@@ -1,8 +1,8 @@
 use crate::srs::SRS;
 use crate::{commitment::*, srs::endos};
-use ark_ec::{msm::VariableBaseMSM, AffineCurve, ProjectiveCurve};
+use ark_ec::{AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{FftField, Field, One, PrimeField, UniformRand, Zero};
-use ark_poly::{univariate::DensePolynomial, UVPolynomial};
+use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial};
 use ark_poly::{EvaluationDomain, Evaluations};
 use mina_poseidon::{sponge::ScalarChallenge, FqSponge};
 use o1_utils::math;
@@ -71,7 +71,10 @@ impl<'a, F: Field> ScaledChunkedPolynomial<F, &'a [F]> {
     }
 }
 
-impl<G: CommitmentCurve> SRS<G> {
+impl<G: CommitmentCurve> SRS<G>
+where
+    <G as AffineRepr>::Group: VariableBaseMSM,
+{
     /// This function opens polynomial commitments in batch
     ///     plnms: batch of polynomials to open commitments for with, optionally, max degrees
     ///     elm: evaluation point vector to open the commitments at
@@ -253,24 +256,24 @@ impl<G: CommitmentCurve> SRS<G> {
             let rand_l = <G::ScalarField as UniformRand>::rand(rng);
             let rand_r = <G::ScalarField as UniformRand>::rand(rng);
 
-            let l = VariableBaseMSM::multi_scalar_mul(
+            let l = G::Group::msm(
                 &[&g[0..n], &[self.h, u]].concat(),
-                &[&a[n..], &[rand_l, inner_prod(a_hi, b_lo)]]
-                    .concat()
-                    .iter()
-                    .map(|x| x.into_repr())
-                    .collect::<Vec<_>>(),
+                &[&a[n..], &[rand_l, inner_prod(a_hi, b_lo)]].concat(),
             )
+            .expect("Unable to perform MSM")
             .into_affine();
 
-            let r = VariableBaseMSM::multi_scalar_mul(
+            let mut bases: Vec<_> = vec![];
+
+            for e in [&g[0..n], &[self.h, u]].concat() {
+                bases.push(e);
+            }
+
+            let r = G::Group::msm(
                 &[&g[n..], &[self.h, u]].concat(),
-                &[&a[0..n], &[rand_r, inner_prod(a_lo, b_hi)]]
-                    .concat()
-                    .iter()
-                    .map(|x| x.into_repr())
-                    .collect::<Vec<_>>(),
+                &[&a[0..n], &[rand_r, inner_prod(a_lo, b_hi)]].concat(),
             )
+            .expect("Unable to perform MSM")
             .into_affine();
 
             lr.push((l, r));
@@ -327,9 +330,8 @@ impl<G: CommitmentCurve> SRS<G> {
         let d = <G::ScalarField as UniformRand>::rand(rng);
         let r_delta = <G::ScalarField as UniformRand>::rand(rng);
 
-        let delta = ((g0.into_projective() + (u.mul(b0))).into_affine().mul(d)
-            + self.h.mul(r_delta))
-        .into_affine();
+        let delta = ((g0.into_group() + (u.mul(b0))).into_affine().mul(d) + self.h.mul(r_delta))
+            .into_affine();
 
         sponge.absorb_g(&[delta]);
         let c = ScalarChallenge(sponge.challenge()).to_field(&endo_r);
@@ -350,7 +352,7 @@ impl<G: CommitmentCurve> SRS<G> {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "G: ark_serialize::CanonicalDeserialize + ark_serialize::CanonicalSerialize")]
-pub struct OpeningProof<G: AffineCurve> {
+pub struct OpeningProof<G: AffineRepr> {
     /// vector of rounds of L & R commitments
     #[serde_as(as = "Vec<(o1_utils::serialization::SerdeAs, o1_utils::serialization::SerdeAs)>")]
     pub lr: Vec<(G, G)>,
@@ -369,7 +371,7 @@ pub struct Challenges<F> {
     pub chal_inv: Vec<F>,
 }
 
-impl<G: AffineCurve> OpeningProof<G> {
+impl<G: AffineRepr> OpeningProof<G> {
     pub fn prechallenges<EFqSponge: FqSponge<G::BaseField, G, G::ScalarField>>(
         &self,
         sponge: &mut EFqSponge,
